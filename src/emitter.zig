@@ -139,7 +139,7 @@ pub const Emitter = struct {
                 const newline_mask: Vec = @splat('\n');
                 const comma_mask: Vec = @splat(',');
                 const mask = (slice == quote_mask) | (slice == newline_mask) | (slice == comma_mask);
-                if (@reduce(.And, mask)) {
+                if (@reduce(.Or, mask)) {
                     return true;
                 }
             }
