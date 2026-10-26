@@ -90,11 +90,12 @@ const IterateTestCase = struct {
         // for each column in test case, we should see a value in the same row in the iterator.
         for (tt.expected_table, 0..) |row, row_index| {
             for (row, 0..) |col, col_index| {
-                var received = it.next() catch |err| {
+                const received_opt = it.next() catch |err| {
                     return try tt.checkErr(err, row_index, col_index);
                 };
                 try tt.expectNoErr(row_index, col_index);
-                const data = received.unescaped();
+                const received = received_opt orelse return error.NotEnoughData;
+                const data = received.unescape().data;
                 const last_column = col_index == row.len - 1;
                 if (!std.mem.eql(u8, col, data) or received.last_column != last_column) {
                     std.debug.print(
@@ -112,16 +113,14 @@ const IterateTestCase = struct {
         }
 
         // ensure it has no more rows
-        var col = it.next() catch |err| switch (err) {
-            csvz.Iterator.Error.EOF => return,
-            else => |e| {
-                return try tt.checkLastErr(e);
-            },
+        const col_opt = it.next() catch |err| {
+            return try tt.checkLastErr(err);
         };
+        const col = col_opt orelse return;
         try tt.expectNoLastErr();
         std.debug.print(
             "Unexpected extra col:\ndata:{s}\nlast_column:{}\n\n",
-            .{ col.unescaped(), col.last_column },
+            .{ col.unescape().data, col.last_column },
         );
         return error.UnexpectedExtraCol;
     }

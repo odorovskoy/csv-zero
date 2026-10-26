@@ -18,17 +18,12 @@ pub fn main(init: std.process.Init) !void {
 
     var row: usize = 0;
     var col: usize = 0;
-    while (true) {
-        var field = it.next() catch |err| switch (err) {
-            error.EOF => break,
-            else => {
-                std.log.err("err {s} at row={d}, col={d}", .{ @errorName(err), row, col });
-                std.process.exit(1);
-            },
-        };
 
-        std.debug.print("field[{d}][{d}] = |{s}|\n", .{ row, col, field.unescaped() });
-        if (field.last_column) {
+    while (try it.next()) |field| {
+        const unescaped = field.unescape();
+        std.debug.print("field[{d}][{d}] = |{s}|\n", .{ row, col, unescaped.data });
+
+        if (unescaped.last_column) {
             row += 1;
             col = 0;
         } else col += 1;

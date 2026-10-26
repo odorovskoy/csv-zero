@@ -32,14 +32,11 @@ pub const Dialect = struct {
 ///     const CsvParser = Csv(.{}); // Use default dialect
 ///     var iterator = CsvParser.init(&reader);
 ///
-///     while (true) {
-///         const col = csvit.next() catch |err| switch (err) {
-///             csvz.Iterator.Error.EOF => break,
-///             else => |e| return e,
-///         };
+///     while (try iterator.next()) |col| {
 ///         // col.data <- raw value which might include unescaped quotes.
-///         // col.unescaped() <- note that this function has a side-effect.
-///         std.debug.print("col: {s}, last? {}\n", .{ col.unescaped(), col.last_column });
+///         // col.unescape() <- note that this function has a side-effect.
+///         const unescaped = col.unescape();
+///         std.debug.print("col: {s}, last? {}\n", .{ unescaped.data, unescaped.last_column });
 ///     }
 /// ```
 pub fn Csv(comptime dialect: Dialect) type {
@@ -77,8 +74,7 @@ pub fn Csv(comptime dialect: Dialect) type {
         /// - ReadFailed: The underlying reader encountered an error
         /// - InvalidQuotes: Malformed quoted fields (e.g., unmatched quotes)
         /// - FieldTooLong: A field exceeded the reader's buffer capacity
-        /// - EOF: Reached the end of the CSV file (not an error condition in normal use)
-        pub const Error = error{ ReadFailed, InvalidQuotes, FieldTooLong, EOF };
+        pub const Error = error{ ReadFailed, InvalidQuotes, FieldTooLong };
 
         const QuotedRegion = struct {
             /// position of the matching quote character in the buffer.
@@ -93,18 +89,18 @@ pub fn Csv(comptime dialect: Dialect) type {
         /// the next call to `next()`. If you need to keep field data longer, copy it.
         ///
         /// The `data` field contains the raw field content, which may include escaped
-        /// quotes (e.g., `""` representing a single `"`). Use `unescaped()` to get
-        /// the final value with escape sequences resolved.
+        /// quotes (e.g., `""` representing a single `"`). Use `unescape()` to get
+        /// the same field with escape sequences resolved.
         pub const Field = struct {
             /// Raw field data as a slice of the reader's buffer.
             /// Contains escaped quotes if `needs_unescape` is true.
-            /// For the final value, use `unescaped()` instead.
+            /// For the final value, use `unescape()` instead.
             data: []u8,
             /// True if this field is the last column in the current row.
             /// Use this to detect row boundaries when iterating through fields.
             last_column: bool,
             /// True if the field contains escaped double quotes (e.g., `""` for `"`).
-            /// When true, call `unescaped()` to remove the escape characters.
+            /// When true, call `unescape()` to get the field with escape sequences resolved.
             needs_unescape: bool = false,
 
             /// Compares two fields for equality based on data, last_column, and needs_unescape.
@@ -114,21 +110,25 @@ pub fn Csv(comptime dialect: Dialect) type {
                     self.needs_unescape == self.needs_unescape;
             }
 
-            /// Returns the unescaped field data with escape sequences removed.
+            /// Returns the same field with escape sequences resolved (e.g., `""` becomes `"`).
             ///
-            /// This method removes CSV escape sequences in-place (e.g., converts `""` to `"`).
-            /// After calling this method, `needs_unescape` is set to false and `data` contains
-            /// the unescaped result. Subsequent calls return the same unescaped data.
+            /// Unescaping is done in-place by overwriting the internal buffer (zero-copy). The returned
+            /// value is a fresh `Field` instance for the same field, whose `needs_unescape` is false and
+            /// whose `data` points to the unescaped content.
             ///
-            /// Note: This modifies the field in-place by overwriting the internal buffer.
-            pub fn unescaped(self: *Field) []u8 {
+            /// Because the buffer is rewritten in place, the field you called this on becomes stale.
+            /// Use the returned instance, not the original one.
+            pub fn unescape(self: *const Field) Field {
                 if (self.needs_unescape) {
-                    self.needs_unescape = false;
-                    self.data = unescapeInPlace(dialect.quote, self.data);
-                    return self.data;
+                    const data = unescapeInPlace(dialect.quote, self.data);
+                    return .{
+                        .data = data,
+                        .last_column = self.last_column,
+                        .needs_unescape = false,
+                    };
                 }
 
-                return self.data;
+                return self.*;
             }
 
             fn fmt(self: *const Field, writer: *Writer) Writer.Error!void {
@@ -156,7 +156,7 @@ pub fn Csv(comptime dialect: Dialect) type {
             return .{ .reader = reader };
         }
 
-        /// finds the end of the quoted region (assuming the first double quote is alerady consumed).
+        /// finds the end of the quoted region (assuming the first double quote is already consumed).
         /// it only returns the quoted region if the character after the double quote is known. If the double
         /// quote is the very last character in the buffer and in the file, then it needs to be handled outside of this
         /// function.
@@ -217,7 +217,7 @@ pub fn Csv(comptime dialect: Dialect) type {
             return null;
         }
 
-        fn nextQuotedRegion(self: *Self) Error!Field {
+        fn nextQuotedRegion(self: *Self) Error!?Field {
             self.reader.toss(1);
             self.needs_unescape = false;
             var r = self.reader;
@@ -296,7 +296,7 @@ pub fn Csv(comptime dialect: Dialect) type {
             }
         }
 
-        inline fn handleBoundary(self: *Self, delim: u8, seek: usize, end: usize) Error!Field {
+        inline fn handleBoundary(self: *Self, delim: u8, seek: usize, end: usize) Error!?Field {
             const prev_is_cr = @intFromBool((end != 0) and (self.reader.buffer[end - 1] == CarriageReturn));
             const is_newline = @intFromBool(delim == Newline);
             const trim_cr = prev_is_cr & is_newline;
@@ -318,26 +318,20 @@ pub fn Csv(comptime dialect: Dialect) type {
         /// this a zero-copy operation. The data remains valid only until the next call to
         /// `next()`, so copy it if you need to retain it longer.
         ///
-        /// When the end of the file is reached, returns `error.EOF`, which is the normal
-        /// termination condition (not an error in typical usage).
-        ///
         /// Example iterating through all fields:
+        ///
         /// ```zig
-        /// while (true) {
-        ///     var field = it.next() catch |err| switch (err) {
-        ///         error.EOF => break,
-        ///         else => |e| // handle the err
-        ///     };
-        ///     const value = field.unescaped();
-        ///     std.debug.print("{s}", .{value});
-        ///     if (field.last_column) {
+        /// while (try it.next()) |field| {
+        ///     const unescaped = field.unescape();
+        ///     std.debug.print("{s}", .{unescaped.data});
+        ///     if (unescaped.last_column) {
         ///         std.debug.print("\n", .{}); // End of row
         ///     } else {
         ///         std.debug.print(",", .{});
         ///     }
         /// }
         /// ```
-        pub fn next(self: *Self) Error!Field {
+        pub fn next(self: *Self) Error!?Field {
             var r = self.reader;
             {
                 const seek = r.seek;
@@ -356,7 +350,7 @@ pub fn Csv(comptime dialect: Dialect) type {
                 Reader.fillMore(r) catch |e| switch (e) {
                     Reader.Error.EndOfStream => {
                         const remaining = r.buffered();
-                        if (remaining.len == 0) return error.EOF;
+                        if (remaining.len == 0) return null;
                         r.toss(remaining.len);
                         return .{ .data = remaining, .last_column = true };
                     },
@@ -379,7 +373,7 @@ pub fn Csv(comptime dialect: Dialect) type {
                 error.ReadFailed => |e| return e,
                 error.EndOfStream => {
                     const remaining = r.buffer[r.seek..r.end];
-                    if (remaining.len == 0) return error.EOF;
+                    if (remaining.len == 0) return null;
                     r.toss(remaining.len);
                     return .{ .data = remaining, .last_column = true };
                 },

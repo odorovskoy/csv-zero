@@ -165,15 +165,15 @@ export fn csvz_iter_from_callback(
 }
 
 export fn csvz_iter_next(it: *Iterator, field: *Field) callconv(.c) Error {
-    const item = it.iterator.next() catch |err| {
+    const item_opt = it.iterator.next() catch |err| {
         @branchHint(.unlikely);
         switch (err) {
-            csvz.Iterator.Error.EOF => return Error.EOF,
             csvz.Iterator.Error.FieldTooLong => return Error.FieldTooLong,
             csvz.Iterator.Error.InvalidQuotes => return Error.InvalidQuotes,
             csvz.Iterator.Error.ReadFailed => return Error.ReadFailed,
         }
     };
+    const item = item_opt orelse return Error.EOF;
     field.data = item.data.ptr;
     field.len = item.data.len;
     field.last_column = if (item.last_column) 1 else 0;

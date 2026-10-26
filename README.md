@@ -91,22 +91,17 @@ const csvz = @import("csvzero");
 ### Count rows and fields
 
 ```zig
-var file = try std.fs.cwd().openFile("data.csv", .{});
-defer file.close();
+const file = try Dir.cwd().openFile(io, "data.csv", .{});
+defer file.close(io);
 
-const buffer: [64 * 1024]u8 = undefined;
-var reader = file.reader(&buffer);
+var buffer: [64 * 1024]u8 = undefined;
+var reader = file.reader(io, &buffer);
 var it = csvz.Iterator.init(&reader.interface);
 
 var rows: usize = 0;
 var fields: usize = 0;
 
-while (true) {
-    const field = it.next() catch |err| switch (err) {
-        csvz.Iterator.Error.EOF => break,
-        else => return err,
-    };
-
+while (try it.next()) |field| {
     fields += 1;
     rows += @intFromBool(field.last_column);
 }
@@ -122,18 +117,14 @@ var it = csvz.Iterator.init(&reader);
 var row: usize = 0;
 var col: usize = 0;
 
-while (true) {
-    var field = it.next() catch |err| switch (err) {
-        error.EOF => break,
-        else => return err,
-    };
-
+while (try it.next()) |field| {
+    const unescaped = field.unescape();
     std.debug.print(
         "field[{d}][{d}] = {s}\n",
-        .{ row, col, field.unescaped() },
+        .{ row, col, unescaped.data },
     );
 
-    if (field.last_column) {
+    if (unescaped.last_column) {
         row += 1;
         col = 0;
     } else col += 1;
@@ -146,12 +137,12 @@ while (true) {
 
 Fields are slices into an internal buffer.
 
-They are **only guaranteed to be valid until the next call to `next()`**—unless you use a fixed buffer.
+They are **only guaranteed to be valid until the next call to `next()`** - unless you use a fixed buffer.
 
 If you need to retain data, copy it explicitly:
 
 ```zig
-const owned = try allocator.dupe(u8, field.unescaped());
+const owned = try allocator.dupe(u8, field.unescape().data);
 ```
 
 This tradeoff is fundamental to zero-allocation parsing.
@@ -175,10 +166,10 @@ Since the buffer never changes, fields remain valid across iterations.
 Unescaping is **lazy** and optional:
 
 ```zig
-// using field.unescaped()
-// has side-effect! overwrites buffer data (if unescaping is needed)
-// and sets needs_unescape to false.
-const value = field.unescaped();
+// using field.unescape() returns the same field with escape sequences resolved.
+// The buffer is rewritten in place (zero-copy); the field you call it on becomes stale -
+// use the returned instance, not the original one.
+const value = field.unescape().data;
 
 // custom unescaping approach
 if (field.needs_unescape) {
@@ -186,7 +177,8 @@ if (field.needs_unescape) {
 }
 ```
 
-Calling `unescaped()` overwrites the field data in the buffer.
+Calling `unescape()` rewrites the field data in the buffer in place (zero-copy) and returns the same field whose
+`needs_unescape` is false and whose `data` holds the unescaped content.
 If you prefer not to mutate the buffer or to use your own approach, you can use `needs_unescape` to learn if any
 unescaping is necessary at all and access the raw field bytes via `field.data`.
 
